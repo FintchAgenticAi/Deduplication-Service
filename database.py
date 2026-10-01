@@ -102,3 +102,28 @@ def log_execution(context, request_id, is_duplicate, status="success", error_mes
         connection.commit()
     finally:
         connection.close()
+
+
+def get_execution_logs(limit=100, request_id=None):
+    """Return recent execution logs, optionally filtered by request ID."""
+    bounded_limit = max(1, min(int(limit), 500))
+    connection = get_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        query = """
+            SELECT log_id, rule_id, method_id, version_id, request_id,
+                   input_record_count, unique_record_count,
+                   duplicate_record_count, status, started_at, ended_at,
+                   error_message
+            FROM deduplication_logic_logs
+        """
+        params = []
+        if request_id:
+            query += " WHERE request_id = %s"
+            params.append(request_id)
+        query += " ORDER BY ended_at DESC LIMIT %s"
+        params.append(bounded_limit)
+        cursor.execute(query, tuple(params))
+        return cursor.fetchall()
+    finally:
+        connection.close()

@@ -8,8 +8,8 @@ from uuid import uuid4
 
 from flask import Flask, request, jsonify
 
-from deduplication_rules.registry import get_rule
-from database import check_connection, get_rule_context, log_execution
+from deduplication_rules.registry import RULE_REGISTRY, get_rule
+from database import check_connection, get_execution_logs, get_rule_context, log_execution
 
 
 app = Flask(__name__)
@@ -18,6 +18,7 @@ app = Flask(__name__)
 # ============================================
 # HEALTH CHECK
 # ============================================
+@app.route("/health", methods=["GET"])
 @app.route("/health/db", methods=["GET"])
 def database_health():
     """Verify the API can reach MySQL."""
@@ -32,11 +33,37 @@ def database_health():
         }), 503
 
 
+@app.route("/api/v1/validation/rules", methods=["GET"])
+def list_validation_rules():
+    """List the validation rules available to the service."""
+    return jsonify({
+        "success": True,
+        "rules": [
+            {"rule_id": rule_id, "name": rule_class.__name__}
+            for rule_id, rule_class in RULE_REGISTRY.items()
+        ],
+    })
+
+
+@app.route("/api/v1/validation/rules/<rule_id>", methods=["GET"])
+def get_validation_rule(rule_id):
+    """Return metadata for one registered validation rule."""
+    rule_class = RULE_REGISTRY.get(rule_id.upper())
+    if rule_class is None:
+        return jsonify({"success": False, "error": f"Unknown rule ID: {rule_id}"}), 404
+
+    return jsonify({
+        "success": True,
+        "rule": {"rule_id": rule_id.upper(), "name": rule_class.__name__},
+    })
+
+
 # ============================================
 # DEDUPLICATION ENDPOINT
 # ============================================
 @app.route("/deduplicate", methods=["POST"])
 @app.route("/api/v1/deduplicate/execute", methods=["POST"])
+@app.route("/api/v1/validation/execute", methods=["POST"])
 def deduplicate():
     """
     Compare two records against one or more deduplication rules.
@@ -186,6 +213,50 @@ def deduplicate():
         "overall_is_duplicate": len(matched_rules) > 0,
         "matched_rules": matched_rules,
     })
+
+
+@app.route("/api/v1/validation/batch", methods=["POST"])
+def validation_batch():
+    """Execute multiple validation payloads in one request."""
+    data = request.get_json(silent=True)
+    items = data.get("requests", data.get("items")) if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return jsonify({
+            "success": False,
+            "error": "A 'requests' or 'items' JSON array is required",
+        }), 400
+
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            results.append({"success": False, "error": "Each batch item must be an object"})
+            continue
+        with app.test_request_context(
+            "/api/v1/validation/execute",
+            method="POST",
+            json=item,
+        ):
+            response = deduplicate()
+        results.append(response.get_json())
+
+    return jsonify({
+        "success": all(result.get("success", False) for result in results),
+        "count": len(results),
+        "results": results,
+    })
+
+
+@app.route("/api/v1/validation/logs", methods=["GET"])
+def validation_logs():
+    """Return recent validation execution logs."""
+    try:
+        logs = get_execution_logs(
+            limit=request.args.get("limit", 100, type=int),
+            request_id=request.args.get("request_id"),
+        )
+        return jsonify({"success": True, "logs": logs})
+    except Exception as error:
+        return jsonify({"success": False, "error": str(error)}), 503
 
 
 # ============================================
